@@ -1,19 +1,15 @@
-# This is taken from https://github.com/numtide/devshell/blob/master/nix/mkNakedShell.nix
+# Parts of this file are taken from https://github.com/numtide/devshell/blob/main/modules/devshell.nix
 # devshell license:
 # MIT License
-
 # Copyright (c) 2021 Numtide and contributors
-
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
 # in the Software without restriction, including without limitation the rights
 # to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 # copies of the Software, and to permit persons to whom the Software is
 # furnished to do so, subject to the following conditions:
-
 # The above copyright notice and this permission notice shall be included in all
 # copies or substantial portions of the Software.
-
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -21,64 +17,99 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-{ bashInteractive
-, coreutils
-, system
-, writeTextFile
-}:
-let
-  bashPath = "${bashInteractive}/bin/bash";
-  stdenv = writeTextFile {
-    name = "naked-stdenv";
-    destination = "/setup";
-    text = ''
-      # Fix for `nix develop`
-      : ''${outputs:=out}
+{
+  bashInteractive,
+  writeText,
+  writeScript,
+  buildEnv,
+  callPackage,
+  ...
+}: {
+  name,
+  packages,
+  shellHook ? "",
+  interactiveShellHook ? "",
+  meta ? {},
+  passthru ? {},
+  bashPackage ? bashInteractive,
+}: let
+  bashBin = "${bashPackage}/bin";
+  bashPath = "${bashPackage}/bin/bash";
 
-      runHook() {
-        eval "$shellHook"
-        unset runHook
-      }
+  mkNakedShell = callPackage ./mkNakedShell.nix {};
+
+  # Write a bash profile to load
+  envBash = writeText "devshell-env.bash" ''
+    if [[ -n ''${IN_NIX_SHELL:-} || ''${DIRENV_IN_ENVRC:-} = 1 ]]; then
+      # We know that PWD is always the current directory in these contexts
+      export PRJ_ROOT=$PWD
+    elif [[ -z ''${PRJ_ROOT:-} ]]; then
+      echo "ERROR: please set the PRJ_ROOT env var to point to the project root" >&2
+      return 1
+    fi
+    # Expose the folder that contains the assembled environment.
+    export DEVSHELL_DIR=@DEVSHELL_DIR@
+    # Prepend the PATH with the devshell dir and bash
+    PATH=''${PATH%:/path-not-set}
+    PATH=''${PATH#${bashBin}:}
+    export PATH=$DEVSHELL_DIR/bin:${bashBin}:$PATH
+    ${shellHook}
+    # Interactive sessions
+    if [[ $- == *i* ]]; then
+      ${interactiveShellHook}
+    fi
+    # Interactive session
+  '';
+
+  # This is our entrypoint script.
+  entrypoint = writeScript "${name}-entrypoint" ''
+    #!${bashPath}
+    # Script that sets-up the environment. Can be both sourced or invoked.
+    export DEVSHELL_DIR=@DEVSHELL_DIR@
+    # If the file is sourced, skip all of the rest and just source the env
+    # script.
+    if [[ $0 != "''${BASH_SOURCE[0]}" ]]; then
+      source "$DEVSHELL_DIR/env.bash"
+      return
+    fi
+    # Be strict!
+    set -euo pipefail
+    if [[ $# = 0 ]]; then
+      # Start an interactive shell
+      exec "${bashPath}" --rcfile "$DEVSHELL_DIR/env.bash" --noprofile
+    elif [[ $1 == "-h" || $1 == "--help" ]]; then
+      cat <<USAGE
+    Usage: ${name}
+      $0 -h | --help          # show this help
+      $0 [--pure]             # start a bash sub-shell
+      $0 [--pure] <cmd> [...] # run a command in the environment
+    Options:
+      * --pure : execute the script in a clean environment
+    USAGE
+      exit
+    elif [[ $1 == "--pure" ]]; then
+      # re-execute the script in a clean environment
+      shift
+      exec /usr/bin/env -i -- "HOME=$HOME" "PRJ_ROOT=$PRJ_ROOT" "$0" "$@"
+    else
+      # Start a script
+      source "$DEVSHELL_DIR/env.bash"
+      exec -- "$@"
+    fi
+  '';
+
+  # Builds the DEVSHELL_DIR with all the dependencies
+  devshell_dir = buildEnv {
+    name = "devshell-dir";
+    paths = packages;
+    postBuild = ''
+      substitute ${envBash} $out/env.bash --subst-var-by DEVSHELL_DIR $out
+      substitute ${entrypoint} $out/entrypoint --subst-var-by DEVSHELL_DIR $out
+      chmod +x $out/entrypoint
     '';
   };
 in
-{ name
-, # A path to a buildEnv that will be loaded by the shell.
-  # We assume that the buildEnv contains an ./env.bash script.
-  profile
-, meta ? { }
-, passthru ? { }
-}:
-(derivation {
-  inherit name system;
-
-  # `nix develop` actually checks and uses builder. And it must be bash.
-  builder = bashPath;
-
-  # Bring in the dependencies on `nix-build`
-  args = [ "-ec" "${coreutils}/bin/ln -s ${profile} $out; exit 0" ];
-
-  # $stdenv/setup is loaded by nix-shell during startup.
-  # https://github.com/nixos/nix/blob/377345e26f1ac4bbc87bb21debcc52a1d03230aa/src/nix-build/nix-build.cc#L429-L432
-  stdenv = stdenv;
-
-  # The shellHook is loaded directly by `nix develop`. But nix-shell
-  # requires that other trampoline.
-  shellHook = ''
-    # Remove all the unnecessary noise that is set by the build env
-    unset NIX_BUILD_TOP NIX_BUILD_CORES NIX_STORE
-    unset TEMP TEMPDIR TMP TMPDIR
-    # $name variable is preserved to keep it compatible with pure shell https://github.com/sindresorhus/pure/blob/47c0c881f0e7cfdb5eaccd335f52ad17b897c060/pure.zsh#L235
-    unset builder out shellHook stdenv system
-    # Flakes stuff
-    unset dontAddDisableDepTrack outputs
-
-    # For `nix develop`. We get /noshell on Linux and /sbin/nologin on macOS.
-    if [[ "$SHELL" == "/noshell" || "$SHELL" == "/sbin/nologin" ]]; then
-      export SHELL=${bashPath}
-    fi
-
-    # Load the environment
-    source "${profile}/env.bash"
-  '';
-}) // { inherit meta passthru; } // passthru
+  mkNakedShell {
+    inherit name meta passthru;
+    profile = devshell_dir;
+  }
