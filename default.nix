@@ -27,8 +27,8 @@
 }: {
   name,
   packages,
-  shellHook ? "",
-  interactiveShellHook ? "",
+  shellHook ? ":",
+  interactiveShellHook ? ":",
   meta ? {},
   passthru ? {},
   bashPackage ? bashInteractive,
