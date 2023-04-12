@@ -4,7 +4,7 @@
 in {
   options = {
     perSystem =
-      flake-parts-lib.mkPerSystemOptions
+      flake-parts-lib.mkPerSystemOption
       ({...}: {
         options = {
           mk-naked-shell.lib.mkNakedShell = l.mkOption {
