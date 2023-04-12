@@ -1,4 +1,8 @@
-{lib, flake-parts-lib, ...}: let
+{
+  lib,
+  flake-parts-lib,
+  ...
+}: let
   l = lib // builtins;
   t = l.types;
 in {
@@ -16,7 +20,7 @@ in {
   config = {
     perSystem = {pkgs, ...}: {
       mk-naked-shell.lib.mkNakedShell =
-        l.mkDefaultOption (pkgs.callPackage ./default.nix {});
+        l.mkDefault (pkgs.callPackage ./default.nix {});
     };
   };
 }
